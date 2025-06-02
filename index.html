@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Lara Translate .lang File Translator</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <style>
+    body {
+      font-family: sans-serif;
+      max-width: 900px;
+      margin: auto;
+      padding: 20px;
+    }
+
+    label {
+      display: block;
+      margin-top: 12px;
+      font-weight: bold;
+    }
+
+    input[type="text"],
+    input[type="file"],
+    select,
+    textarea {
+      width: 100%;
+      padding: 8px;
+      margin-top: 4px;
+      box-sizing: border-box;
+      font-family: monospace;
+    }
+
+    textarea {
+      height: 300px;
+      resize: vertical;
+    }
+
+    .checkbox-list {
+      max-height: 150px;
+      overflow-y: auto;
+      border: 1px solid #ccc;
+      padding: 8px;
+      margin-top: 4px;
+      font-weight: normal;
+    }
+
+    .checkbox-list label {
+      display: block;
+      margin-bottom: 4px;
+      cursor: pointer;
+    }
+
+    button {
+      margin-top: 20px;
+      padding: 12px 24px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+
+    p.message {
+      margin-top: 20px;
+      font-weight: bold;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Lara Translate .lang File Translator</h1>
+
+  <label>
+    Upload .lang file:
+    <input id="langFile" type="file" accept=".lang" />
+  </label>
+
+  <label>
+    Auto-Detected Source Language:
+    <select id="sourceLang"></select>
+  </label>
+
+  <label>
+    Target Languages:
+    <button id="selectAllBtn" type="button">Select All</button>
+    <div class="checkbox-list" id="targetLangsContainer"></div>
+  </label>
+
+  <textarea id="inputText" placeholder="Or paste your .lang content here..."></textarea>
+
+  <button id="translateBtn">Translate & Download ZIP</button>
+  <p class="message" id="message"></p>
+
+  <script>
+    const LANGUAGES = [
+      ["en_US", "English (United States)"],
+      ["en_GB", "English (United Kingdom)"],
+      ["de_DE", "Deutsch (Deutschland)"],
+      ["es_ES", "Español (España)"],
+      ["es_MX", "Español (México)"],
+      ["fr_FR", "Français (France)"],
+      ["fr_CA", "Français (Canada)"],
+      ["it_IT", "Italiano (Italia)"],
+      ["ja_JP", "日本語 (日本)"],
+      ["ko_KR", "한국어 (대한민국)"],
+      ["pt_BR", "Português (Brasil)"],
+      ["pt_PT", "Português (Portugal)"],
+      ["ru_RU", "Русский (Россия)"],
+      ["zh_CN", "中文(简体)"],
+      ["zh_TW", "中文(繁體)"],
+      ["nl_NL", "Nederlands (Nederland)"],
+      ["bg_BG", "Български (България)"],
+      ["cs_CZ", "Čeština (Česko)"],
+      ["da_DK", "Dansk (Danmark)"],
+      ["el_GR", "Ελληνικά (Ελλάδα)"],
+      ["fi_FI", "Suomi (Suomi)"],
+      ["hu_HU", "Magyar (Magyarország)"],
+      ["id_ID", "Indonesia (Indonesia)"],
+      ["nb_NO", "Norsk bokmål (Norge)"],
+      ["pl_PL", "Polski (Polska)"],
+      ["sk_SK", "Slovenčina (Slovensko)"],
+      ["sv_SE", "Svenska (Sverige)"],
+      ["tr_TR", "Türkçe (Türkiye)"],
+      ["uk_UA", "Українська (Україна)"]
+    ];
+
+    const translationCache = JSON.parse(localStorage.getItem("laraCache") || "{}");
+    const saveCache = () => localStorage.setItem("laraCache", JSON.stringify(translationCache));
+
+    const sourceLangSelect = document.getElementById("sourceLang");
+    const targetLangsContainer = document.getElementById("targetLangsContainer");
+
+    LANGUAGES.forEach(([code, label]) => {
+      const opt = document.createElement("option");
+      opt.value = code;
+      opt.textContent = `${label} (${code})`;
+      sourceLangSelect.appendChild(opt);
+
+      const checkboxLabel = document.createElement("label");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = code;
+      if (code === "es_ES") checkbox.checked = true;
+      checkboxLabel.appendChild(checkbox);
+      checkboxLabel.append(` ${label} (${code})`);
+      targetLangsContainer.appendChild(checkboxLabel);
+    });
+
+    document.getElementById("selectAllBtn").onclick = () => {
+      const checkboxes = targetLangsContainer.querySelectorAll("input[type=checkbox]");
+      const allChecked = Array.from(checkboxes).every(c => c.checked);
+      checkboxes.forEach(c => c.checked = !allChecked);
+    };
+
+    document.getElementById("langFile").addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const text = await file.text();
+      document.getElementById("inputText").value = text;
+
+      const firstLine = text.split("\n").find(line => line.includes("="));
+      if (!firstLine) return;
+      const sample = firstLine.split("=")[1]?.trim();
+      if (!sample) return;
+
+      const detected = await detectLanguage(sample);
+      const matching = LANGUAGES.find(([code]) => code.startsWith(detected));
+      if (matching) sourceLangSelect.value = matching[0];
+    });
+
+    function extractFormatting(text) {
+      const prefixMatch = text.match(/^(§[0-9a-fk-or])*/i);
+      const prefix = prefixMatch ? prefixMatch[0] : "";
+      const suffixMatch = text.match(/([\uE000-\uF8FF]+)$/);
+      const suffix = suffixMatch ? suffixMatch[0] : "";
+      const coreText = suffix ? text.slice(prefix.length, -suffix.length) : text.slice(prefix.length);
+      return { prefix, coreText, suffix };
+    }
+
+    async function detectLanguage(text) {
+      try {
+        const res = await fetch("https://webapi.laratranslate.com/detect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ q: text })
+        });
+        const data = await res.json();
+        return data?.content?.language || "en";
+      } catch {
+        return "en";
+      }
+    }
+
+    async function translateText(text, sourceLang, targetLang) {
+      const { prefix, coreText, suffix } = extractFormatting(text);
+      if (!coreText.trim()) return text;
+
+      const cacheKey = `${sourceLang}|${targetLang}|${coreText}`;
+      if (translationCache[cacheKey]) return prefix + translationCache[cacheKey] + suffix;
+
+      try {
+        const res = await fetch("https://webapi.laratranslate.com/translate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            q: coreText,
+            source: sourceLang.split("_")[0],
+            target: targetLang.split("_")[0],
+            instructions: []
+          })
+        });
+
+        const data = await res.json();
+        const translated = data?.content?.translation || coreText;
+        translationCache[cacheKey] = translated;
+        saveCache();
+        return prefix + translated + suffix;
+      } catch (err) {
+        console.error("Translation error:", err);
+        return text;
+      }
+    }
+
+    document.getElementById("translateBtn").onclick = async () => {
+      const sourceLang = document.getElementById("sourceLang").value;
+      const inputText = document.getElementById("inputText").value;
+      const targetLangs = Array.from(targetLangsContainer.querySelectorAll("input[type=checkbox]:checked")).map(c => c.value);
+      const messageEl = document.getElementById("message");
+
+      if (!inputText.trim()) return alert("Please upload or paste a .lang file.");
+      if (targetLangs.length === 0) return alert("Please select at least one target language.");
+
+      messageEl.textContent = "Translating... Please wait.";
+      document.getElementById("translateBtn").disabled = true;
+
+      const lines = inputText.split(/\r?\n/);
+      const zip = new JSZip();
+
+      for (const targetLang of targetLangs) {
+        const outputLines = [];
+        for (const line of lines) {
+          if (line.trim() === "" || line.trim().startsWith("#")) {
+            outputLines.push(line);
+            continue;
+          }
+          if (line.includes("=")) {
+            const [key, ...rest] = line.split("=");
+            const value = rest.join("=");
+            const translatedValue = await translateText(value.trim(), sourceLang, targetLang);
+            outputLines.push(`${key.trim()}=${translatedValue}`);
+          } else {
+            outputLines.push(line);
+          }
+        }
+        zip.file(`${targetLang}.lang`, outputLines.join("\n"));
+      }
+
+      const content = await zip.generateAsync({ type: "blob" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(content);
+      a.download = "translated_lang_files.zip";
+      a.click();
+
+      messageEl.textContent = "✅ Translation complete!";
+      document.getElementById("translateBtn").disabled = false;
+    };
+  </script>
+</body>
+
+</html>
